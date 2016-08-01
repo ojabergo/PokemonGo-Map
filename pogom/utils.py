@@ -25,7 +25,7 @@ def parse_unicode(bytestring):
 def verify_config_file_exists(filename):
     fullpath = os.path.join(os.path.dirname(__file__), filename)
     if not os.path.exists(fullpath):
-        log.info("Could not find " + filename + ", copying default")
+        log.info('Could not find %s, copying default', filename)
         shutil.copy2(fullpath + '.example', fullpath)
 
 
@@ -33,10 +33,13 @@ def get_args():
     # fuck PEP8
     configpath = os.path.join(os.path.dirname(__file__), '../config/config.ini')
     parser = configargparse.ArgParser(default_config_files=[configpath])
-    parser.add_argument('-a', '--auth-service', type=str.lower,
-                        help='Auth Service', default='ptc')
-    parser.add_argument('-u', '--username', help='Username')
-    parser.add_argument('-p', '--password', help='Password')
+    parser.add_argument('-a', '--auth-service', type=str.lower, action='append',
+                        help='Auth Services, either one for all accounts or one per account. \
+                        ptc or google. Defaults all to ptc.')
+    parser.add_argument('-u', '--username', action='append',
+                        help='Usernames, one per account.')
+    parser.add_argument('-p', '--password', action='append',
+                        help='Passwords, either single one for all accounts or one per account.')
     parser.add_argument('-l', '--location', type=parse_unicode,
                         help='Location, can be an address or coordinates')
     parser.add_argument('-st', '--step-limit', help='Steps', type=int,
@@ -74,6 +77,9 @@ def get_args():
     parser.add_argument('-os', '--only-server',
                         help='Server-Only Mode. Starts only the Webserver without the searcher.',
                         action='store_true', default=False)
+    parser.add_argument('-nsc','--no-search-control',
+                        help='Disables search control',
+                        action='store_false', dest='search_control', default=True)
     parser.add_argument('-fl', '--fixed-location',
                         help='Hides the search bar for use in shared maps.',
                         action='store_true', default=False)
@@ -84,6 +90,9 @@ def get_args():
                         action='store_true', default=False)
     parser.add_argument('-D', '--db', help='Database filename',
                         default='pogom.db')
+    parser.add_argument('-cd', '--clear-db',
+                        help='Deletes the existing database before starting the Webserver.',
+                        action='store_true', default=False)
     parser.add_argument('-t', '--num-threads', help='Number of search threads', type=int, default=1)
     parser.add_argument('-np', '--no-pokemon',
                         help='Disables Pokemon from the map (including parsing them into local db)',
@@ -100,6 +109,7 @@ def get_args():
     parser.add_argument('--db-user', help='Username for the database')
     parser.add_argument('--db-pass', help='Password for the database')
     parser.add_argument('--db-host', help='IP or hostname for the database')
+    parser.add_argument('--db-max_connections', help='Max connections for the database', type=int, default=5)
     parser.add_argument('-wh', '--webhook', help='Define URL(s) to POST webhook information to',
                         nargs='*', default=False, dest='webhooks')
     parser.set_defaults(DEBUG=False)
@@ -117,10 +127,36 @@ def get_args():
             print sys.argv[0] + ': error: arguments -u/--username, -l/--location, -st/--step-limit are required'
             sys.exit(1)
 
-        if config["PASSWORD"] is None and args.password is None:
-            config["PASSWORD"] = args.password = getpass.getpass()
-        elif args.password is None:
-            args.password = config["PASSWORD"]
+        if args.auth_service is None:
+            args.auth_service = ['ptc']
+
+        if args.password is None:
+            if config['PASSWORD'] is None:
+                config['PASSWORD'] = getpass.getpass()
+            args.password = [config['PASSWORD']]
+
+        num_username = len(args.username)
+
+        # If there are multiple usernames, then we either need one passwords that we use for all,
+        # or equal amount so that they match 1:1. Same for authentication services.
+        if num_username > 1:
+            num_passwd = len(args.password)
+            if (num_passwd == 1):
+                log.debug('More than one username and one password given. Using same password for all accounts.')
+                args.password = args.password * num_username
+            elif (num_passwd > 1 and num_username != num_passwd):
+                print sys.argv[0] + ': error: number of usernames ({}) does not match the number of passwords ({})' \
+                                    .format(num_username, num_passwd)
+                sys.exit(1);
+
+            num_auth = len(args.auth_service)
+            if (num_auth == 1):
+                log.debug('More than one username and one auth service given. Using same auth service for all accounts.')
+                args.auth_service = args.auth_service * num_username
+            if (num_auth > 1 and num_username != num_auth):
+                print sys.argv[0] + ': error: number of usernames ({}) does not match the number of auth providers ({})' \
+                                    .format(num_username, num_auth)
+                sys.exit(1);
 
     return args
 
@@ -130,8 +166,8 @@ def insert_mock_data():
     num_pokestop = 6
     num_gym = 6
 
-    log.info('Creating fake: {} pokemon, {} pokestops, {} gyms'.format(
-        num_pokemon, num_pokestop, num_gym))
+    log.info('Creating fake: %d pokemon, %d pokestops, %d gyms',
+        num_pokemon, num_pokestop, num_gym)
 
     from .models import Pokemon, Pokestop, Gym
     from .search import generate_location_steps
@@ -145,7 +181,7 @@ def insert_mock_data():
 
     detect_time = datetime.now()
 
-    for i in range(num_pokemon):
+    for i in range(1, num_pokemon):
         Pokemon.create(encounter_id=uuid.uuid4(),
                        spawnpoint_id='sp{}'.format(i),
                        pokemon_id=(i+1) % 150,
@@ -154,7 +190,7 @@ def insert_mock_data():
                        disappear_time=disappear_time,
                        detect_time=detect_time)
 
-    for i in range(num_pokestop):
+    for i in range(1, num_pokestop):
         Pokestop.create(pokestop_id=uuid.uuid4(),
                         enabled=True,
                         latitude=locations[i+num_pokemon][0],
@@ -165,7 +201,7 @@ def insert_mock_data():
                         active_pokemon_id=i
                         )
 
-    for i in range(num_gym):
+    for i in range(1, num_gym):
         Gym.create(gym_id=uuid.uuid4(),
                    team_id=i % 3,
                    guard_pokemon_id=(i+1) % 150,
@@ -176,19 +212,46 @@ def insert_mock_data():
                    gym_points=1000
                    )
 
-
-def get_pokemon_name(pokemon_id):
-    if not hasattr(get_pokemon_name, 'names'):
+def i8ln(word):
+    if config['LOCALE'] == "en":
+        return word
+    if not hasattr(i8ln, 'dictionary'):
         file_path = os.path.join(
             config['ROOT_PATH'],
             config['LOCALES_DIR'],
-            'pokemon.{}.json'.format(config['LOCALE']))
+            '{}.min.json'.format(config['LOCALE']))
+        if os.path.isfile(file_path):
+            with open(file_path, 'r') as f:
+                i8ln.dictionary = json.loads(f.read())
+        else:
+            log.warning('Skipping translations - Unable to find locale file: %s', file_path)
+            return word
+    if word in i8ln.dictionary:
+        return i8ln.dictionary[word]
+    else:
+        log.debug('Unable to find translation for "%s" in locale %s!', word, config['LOCALE'])
+        return word
+
+def get_pokemon_data(pokemon_id):
+    if not hasattr(get_pokemon_data, 'pokemon'):
+        file_path = os.path.join(
+            config['ROOT_PATH'],
+            config['DATA_DIR'],
+            'pokemon.min.json')
 
         with open(file_path, 'r') as f:
-            get_pokemon_name.names = json.loads(f.read())
+            get_pokemon_data.pokemon = json.loads(f.read())
+    return get_pokemon_data.pokemon[str(pokemon_id)]
 
-    return get_pokemon_name.names[str(pokemon_id)]
+def get_pokemon_name(pokemon_id):
+    return i8ln(get_pokemon_data(pokemon_id)['name'])
 
+def get_pokemon_rarity(pokemon_id):
+    return i8ln(get_pokemon_data(pokemon_id)['rarity'])
+
+def get_pokemon_types(pokemon_id):
+    pokemon_types = get_pokemon_data(pokemon_id)['types']
+    return map(lambda x: {"type": i8ln(x['type']), "color": x['color']}, pokemon_types)
 
 def send_to_webhook(message_type, message):
     args = get_args()
@@ -205,6 +268,6 @@ def send_to_webhook(message_type, message):
             try:
                 requests.post(w, json=data, timeout=(None, 1))
             except requests.exceptions.ReadTimeout:
-                log.debug('Could not receive response from webhook')
+                log.debug('Response timeout on webhook endpoint %s', w)
             except requests.exceptions.RequestException as e:
                 log.debug(e)
